@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="no">
+<head>
+  <meta charset="UTF-8">
+  <title>PDF Samler Komplett</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.10.377/pdf.min.js"></script>
+  <style>
+    body { font-family: sans-serif; margin: 2em; background: #f9f9f9; }
+    #dropZone {
+      border: 2px dashed #888; background: #fff; padding: 20px; text-align: center;
+      margin-bottom: 1em; border-radius: 10px;
+    }
+    #previewZone { display: flex; flex-wrap: wrap; gap: 10px; }
+    .preview { position: relative; display: flex; flex-direction: column;
+      align-items: center; margin: 5px; cursor: move; transition: transform 0.2s ease; }
+    .preview img, .preview canvas {
+      max-width: 150px; max-height: 200px; border: 2px solid #ccc;
+      border-radius: 6px; transition: transform 0.2s ease-in-out;
+    }
+    .vedlegg-index { font-weight: bold; margin-top: 4px; }
+    button {
+      margin: 0.5em; padding: 10px 20px; background: #4CAF50; color: white;
+      border: none; border-radius: 5px; font-size: 1em; cursor: pointer;
+    }
+    button:hover { background-color: #45a049; }
+    #status { margin-top: 1em; font-weight: bold; }
+  </style>
+</head>
+<body>
+  <h1>PDF Samler</h1>
+  <div id="dropZone">Dra og slipp filer her</div>
+  <input type="file" id="pdfFiles" multiple accept="application/pdf,image/jpeg,image/png">
+  <div id="previewZone"></div>
+  <div>
+    <button onclick="mergeFiles()">Slå sammen</button>
+    <button onclick="clearFiles()">Nullstill</button>
+  </div>
+  <p id="status"></p>
+
+<script>
+let allFiles = [];
+let fileRotations = new Map();
+const dropZone = document.getElementById("dropZone");
+const fileInput = document.getElementById("pdfFiles");
+const previewZone = document.getElementById("previewZone");
+const status = document.getElementById("status");
+
+function updateIndexes() {
+  previewZone.querySelectorAll(".preview").forEach((preview, i) => {
+    const index = preview.querySelector(".vedlegg-index");
+    if (index) index.textContent = i === 0 ? "Forside" : i;
+  });
+}
+
+function addFiles(files) {
+  for (const file of files) {
+    const name = file.name;
+    allFiles.push({ file, name });
+
+    const previewWrapper = document.createElement("div");
+    previewWrapper.className = "preview";
+    previewWrapper.draggable = true;
+    previewWrapper.dataset.name = name;
+
+    const indexLabel = document.createElement("div");
+    indexLabel.className = "vedlegg-index";
+    indexLabel.textContent = allFiles.length === 1 ? "Forside" : allFiles.length - 1;
+    previewWrapper.appendChild(indexLabel);
+
+    previewWrapper.addEventListener("dragstart", (e) => {
+      e.dataTransfer.setData("text/plain", name);
+      previewWrapper.classList.add("dragging");
+    });
+    previewWrapper.addEventListener("dragover", (e) => {
+      e.preventDefault();
+    });
+    previewWrapper.addEventListener("drop", (e) => {
+      e.preventDefault();
+      const from = e.dataTransfer.getData("text/plain");
+      const fromIndex = allFiles.findIndex(f => f.name === from);
+      const toIndex = allFiles.findIndex(f => f.name === previewWrapper.dataset.name);
+      const [moved] = allFiles.splice(fromIndex, 1);
+      allFiles.splice(toIndex, 0, moved);
+      renderPreviews();
+    });
+
+    if (file.type.startsWith("image/")) {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const img = document.createElement("img");
+        img.src = e.target.result;
+        img.dataset.filename = name;
+        img.onclick = () => rotateElement(img, name);
+        previewWrapper.insertBefore(img, indexLabel);
+        fileRotations.set(name, 0);
+      };
+      reader.readAsDataURL(file);
+    } else if (file.type === "application/pdf") {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const loadingTask = pdfjsLib.getDocument({ data: e.target.result });
+        loadingTask.promise.then((pdf) => {
+          pdf.getPage(1).then((page) => {
+            const viewport = page.getViewport({ scale: 0.3 });
+            const canvas = document.createElement("canvas");
+            const context = canvas.getContext("2d");
+            canvas.width = viewport.width;
+            canvas.height = viewport.height;
+            canvas.dataset.filename = name;
+            canvas.onclick = () => rotateElement(canvas, name);
+            page.render({ canvasContext: context, viewport });
+            previewWrapper.insertBefore(canvas, indexLabel);
+            fileRotations.set(name, 0);
+          });
+        });
+      };
+      reader.readAsArrayBuffer(file);
+    }
+
+    previewZone.appendChild(previewWrapper);
+  }
+  updateIndexes();
+  status.textContent = `${allFiles.length} fil(er) lagt til.`;
+}
+
+function renderPreviews() {
+  previewZone.innerHTML = "";
+  const filesCopy = [...allFiles];
+  allFiles = [];
+  fileRotations = new Map();
+  filesCopy.forEach(({ file }) => addFiles([file]));
+}
+
+function clearFiles() {
+  allFiles = [];
+  fileRotations = new Map();
+  previewZone.innerHTML = "";
+  fileInput.value = "";
+  status.textContent = "Filer nullstilt.";
+}
+
+function rotateElement(element, filename) {
+  const current = fileRotations.get(filename) || 0;
+  const next = (current + 90) % 360;
+  fileRotations.set(filename, next);
+  element.style.transform = `rotate(${next}deg)`;
+}
+
+async function mergeFiles() {
+  const A4W = 595.28, A4H = 841.89;
+  const mergedPdf = await PDFLib.PDFDocument.create();
+  const font = await mergedPdf.embedFont(PDFLib.StandardFonts.HelveticaBold);
+  let vedleggNr = 1;
+
+  for (let i = 0; i < allFiles.length; i++) {
+    const { file, name } = allFiles[i];
+    const rot = fileRotations.get(name) || 0;
+    const radians = rot * Math.PI / 180;
+    const arrayBuffer = await file.arrayBuffer();
+
+    if (file.type === "application/pdf") {
+      const srcPdf = await PDFLib.PDFDocument.load(arrayBuffer);
+      const pages = await mergedPdf.copyPages(srcPdf, srcPdf.getPageIndices());
+      for (let j = 0; j < pages.length; j++) {
+        const page = pages[j];
+        if (rot !== 0) page.setRotation(PDFLib.degrees(rot));
+        mergedPdf.addPage(page);
+        if (i > 0) {
+          page.drawRectangle({
+            x: 20, y: A4H - 35, width: 120, height: 18,
+            color: PDFLib.rgb(1, 1, 1),
+            borderColor: PDFLib.rgb(1, 0, 0),
+            borderWidth: 1
+          });
+          page.drawText(`Vedlegg ${vedleggNr} side ${j + 1}`, {
+            x: 24, y: A4H - 30, size: 10, font,
+            color: PDFLib.rgb(0, 0, 0),
+          });
+        }
+      }
+      if (i > 0) vedleggNr++;
+    } else {
+      const img = file.type === 'image/png'
+        ? await mergedPdf.embedPng(arrayBuffer)
+        : await mergedPdf.embedJpg(arrayBuffer);
+      const { width: iw, height: ih } = img.size();
+
+      const sin = Math.abs(Math.sin(radians));
+      const cos = Math.abs(Math.cos(radians));
+      const boundingWidth = iw * cos + ih * sin;
+      const boundingHeight = iw * sin + ih * cos;
+      const scale = Math.min(A4W / boundingWidth, A4H / boundingHeight);
+
+      const sw = iw * scale;
+      const sh = ih * scale;
+
+      let x = 0, y = 0;
+      if (rot === 0) {
+        x = (A4W - sw) / 2;
+        y = (A4H - sh) / 2;
+      } else if (rot === 90) {
+        x = (A4W + sh) / 2;
+        y = (A4H - sw) / 2;
+      } else if (rot === 180) {
+        x = (A4W + sw) / 2;
+        y = (A4H + sh) / 2;
+      } else if (rot === 270) {
+        x = (A4W - sh) / 2;
+        y = (A4H + sw) / 2;
+      }
+
+      const page = mergedPdf.addPage([A4W, A4H]);
+      page.drawImage(img, {
+        x, y, width: sw, height: sh,
+        rotate: PDFLib.degrees(rot)
+      });
+
+      if (i > 0) {
+        page.drawRectangle({
+          x: 20, y: A4H - 35, width: 120, height: 18,
+          color: PDFLib.rgb(1, 1, 1),
+          borderColor: PDFLib.rgb(1, 0, 0),
+          borderWidth: 1
+        });
+        page.drawText(`Vedlegg ${vedleggNr}`, {
+          x: 24, y: A4H - 30, size: 10, font,
+          color: PDFLib.rgb(0, 0, 0),
+        });
+        vedleggNr++;
+      }
+    }
+  }
+
+  const pdfBytes = await mergedPdf.save();
+  const blob = new Blob([pdfBytes], { type: "application/pdf" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "sammensatt.pdf";
+  a.click();
+  status.textContent = "Ferdig! PDF er lastet ned.";
+}
+
+dropZone.addEventListener("dragover", (e) => e.preventDefault());
+dropZone.addEventListener("drop", (e) => {
+  e.preventDefault();
+  addFiles(e.dataTransfer.files);
+});
+fileInput.addEventListener("change", () => addFiles(fileInput.files));
+</script>
+</body>
+</html>
